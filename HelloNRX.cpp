@@ -149,6 +149,132 @@ void helloNrxCmd()
         acutPrintf(L"\n❌ Ошибка создания опоры: %d", es);
     }
 }
+// Добавьте декларацию команды
+#include "..\ViperCSObj\vCSTools.h"
+#include "..\ViperCSObj\vCSILBase.h"   // для ETypeInLine
+
+void helloArmCmd()
+{
+    // Создаём без шаблона: указываем тип inline
+    unsigned int nType = vCSILBase::til_inline;
+    const CElement* pRoot = nullptr;
+    bool bBreak = false;
+    const AcGePoint2d* pL1_L2 = nullptr;
+
+    // 1) Выбор трубы и точки
+    acutPrintf(L"\nВыберите трубу (ось/сегмент/подсегмент): ");
+    ads_name en; AcGePoint3d pickPt;
+    if (acedEntSel(L"\nТруба: ", en, asDblArray(pickPt)) != RTNORM) {
+        acutPrintf(L"\nОтмена.");
+        return;
+    }
+    AcDbObjectId idEnt; acdbGetObjectId(idEnt, en);
+
+    vCSDragManagerSmart dms;           // RAII DM + транзакция
+    vCSDragManager* dm = dms.operator->();
+
+    // --- определяем ось и собираем сегменты по базе ---
+    AcDbObjectId idAxis = dm->GetIdAxisBySegmentId(idEnt);
+    if (idAxis.isNull()) idAxis = dm->GetIdAxisByEntityId(idEnt);
+    if (idAxis.isNull()) idAxis = CVCSUtils::getAxis(idEnt);
+
+    AcDbObjectIdArray segIds;
+    if (!idAxis.isNull())
+        vCSTools::GetSegments(idAxis, segIds); // сегменты оси из БД
+
+    // прямой поиск сегмента по OID
+    vCS_DM_Seg* pSegBest = dm->GetSeg(idEnt);
+    AcGePoint3d ptClosestBest = pickPt;
+    double dist2Best = 1e300;
+
+    // перебор сегментов: проверяем подсегменты и ищем ближайший
+    for (int i = 0; i < segIds.length(); ++i) {
+        vCS_DM_Seg* s = dm->GetSeg(segIds[i]);
+        if (!s) continue;
+
+        AcDbObjectIdArray ssids;
+        s->GetSubSegments(ssids);
+        s->GetSubSegmentsX(ssids);
+        for (int k = 0; k < ssids.length(); ++k) {
+            if (ssids[k] == idEnt) pSegBest = s;
+        }
+
+        AcGePoint3d ptClosest;
+        s->get_closest_point(pickPt, ptClosest);
+        AcGeVector3d d = ptClosest - pickPt;
+        double d2 = d.lengthSqrd();
+        if (d2 < dist2Best) {
+            dist2Best = d2;
+            ptClosestBest = ptClosest;
+            if (!pSegBest) pSegBest = s;
+        }
+    }
+
+    // запасной вариант через FindAxis
+    if (!pSegBest && !idAxis.isNull()) {
+        vCS_DM_Axis* pAxis = dm->FindAxis(idAxis);
+        if (pAxis) {
+            int segCount = pAxis->GetSegCount();
+            for (int i = 0; i < segCount; ++i) {
+                vCS_DM_Seg* s = pAxis->GetSeg(i);
+                if (!s) continue;
+                AcGePoint3d ptClosest;
+                s->get_closest_point(pickPt, ptClosest);
+                AcGeVector3d d = ptClosest - pickPt;
+                double d2 = d.lengthSqrd();
+                if (d2 < dist2Best) {
+                    dist2Best = d2;
+                    ptClosestBest = ptClosest;
+                    pSegBest = s;
+                }
+            }
+        }
+    }
+
+    if (!pSegBest) {
+        acutPrintf(L"\n⚠ Не удалось выбрать сегмент.");
+        return;
+    }
+
+    AcDbObjectId segId = pSegBest->OID();
+
+    double distFromPrev = 0.0;
+    pSegBest->GetDistFromPrev(ptClosestBest, distFromPrev, true);
+
+    vCSProfilePtr profPtr;
+    AcGeVector3d vOff;
+    if (!pSegBest->ArrDistProfileGetByDist(distFromPrev, profPtr, vOff) || profPtr.IsNull()) {
+        acutPrintf(L"\n⚠ Не удалось получить профиль сегмента.");
+        return;
+    }
+    const vCSProfileBase* pSubSegProfile = profPtr; // implicit cast
+
+    AcGePoint3d ptInsert = ptClosestBest;
+
+    dm->m_InLineCreate.ClearDMTypes();
+    dm->m_InLineCreate.SetPickedSegID(segId);
+
+    bool checkMinidir = true;
+    bool bDialogDraw = false;
+
+    Acad::ErrorStatus es = dm->m_InLineCreate.ReCalculateModelMainInLineCreate(
+        segId,
+        pSubSegProfile,
+        ptInsert,
+        nType,       // тип inline (без шаблона)
+        pRoot,
+        bBreak,
+        pL1_L2
+    );
+
+    if (es == Acad::eOk) {
+        dms.commit();
+        acutPrintf(L"\n✅ Арматура вставлена на трубу (без шаблона).");
+    }
+    else {
+        acutPrintf(L"\n❌ Ошибка создания арматуры: %d", es);
+    }
+}
 
 // Только для nanoCAD: экспортируем ncrxEntryPoint
 extern "C" __declspec(dllexport) AcRx::AppRetCode
@@ -159,8 +285,16 @@ ncrxEntryPoint(AcRx::AppMsgCode msg, void* appId)
     case AcRx::kInitAppMsg:
         acrxDynamicLinker->unlockApplication(appId);
         acrxDynamicLinker->registerAppMDIAware(appId);
-        acedRegCmds->addCommand(L"HELLONRX_GROUP", L"_HELLONRX", L"HELLONRX", ACRX_CMD_MODAL, helloNrxCmd);
+
+        acedRegCmds->addCommand(L"HELLONRX_GROUP",
+            L"_HELLONRX", L"HELLONRX",
+            ACRX_CMD_MODAL, helloNrxCmd);
+
+        acedRegCmds->addCommand(L"HELLONRX_GROUP",
+            L"_VALVE", L"VALVE",
+            ACRX_CMD_MODAL, helloArmCmd);
         break;
+
     case AcRx::kUnloadAppMsg:
         acedRegCmds->removeGroup(L"HELLONRX_GROUP");
         break;
