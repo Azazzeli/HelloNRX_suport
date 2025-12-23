@@ -124,8 +124,8 @@ void helloNrxCmd()
     }
 }
 
-extern "C" DLLIMPEXP AcRx::AppRetCode
-acrxEntryPoint(AcRx::AppMsgCode msg, void* appId)
+extern "C" __declspec(dllexport) AcRx::AppRetCode
+ncrxEntryPoint(AcRx::AppMsgCode msg, void* appId)
 {
     switch (msg)
     {
